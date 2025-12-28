@@ -27,6 +27,8 @@ type ThingChore struct {
 	ChoreID      int    `json:"choreId" gorm:"column:chore_id;primaryKey;uniqueIndex:idx_thing_user"`
 	TriggerState string `json:"triggerState" gorm:"column:trigger_state"`
 	Condition    string `json:"condition" gorm:"column:condition"`
+	ActionType   string `json:"actionType,omitempty" gorm:"column:action_type"`
+	ActionValue  string `json:"actionValue,omitempty" gorm:"column:action_value"`
 }
 
 type ThingTrigger struct {
