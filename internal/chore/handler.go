@@ -1699,6 +1699,16 @@ func (h *Handler) completeChore(c *gin.Context) {
 		h.stRepo.ResetSubtasksCompletion(c, updatedChore.ID)
 	}
 
+	// Execute Thing action if configured
+	if updatedChore.ThingChore != nil && updatedChore.ThingChore.ThingID > 0 && updatedChore.ThingChore.ActionType != "" {
+		if err := h.executeThingAction(c, updatedChore, logger); err != nil {
+			logger.Warn("Failed to execute Thing action",
+				"choreId", updatedChore.ID,
+				"thingId", updatedChore.ThingChore.ThingID,
+				"error", err)
+		}
+	}
+
 	// go func() {
 
 	// 	h.notifier.SendChoreCompletion(c, chore, effectiveUser)
@@ -3224,6 +3234,89 @@ func (h *Handler) sendNudgeToDevices(c context.Context, fcmTokens []string, titl
 					"error", result.Error)
 			}
 		}
+	}
+
+	return nil
+}
+
+// executeThingAction executes the configured action on a Thing when a chore is completed
+func (h *Handler) executeThingAction(c context.Context, chore *chModel.Chore, logger *logging.Logger) error {
+	if chore.ThingChore == nil || chore.ThingChore.ThingID <= 0 || chore.ThingChore.ActionType == "" {
+		return nil
+	}
+
+	// Fetch the Thing
+	thing, err := h.tRepo.GetThingByID(c, chore.ThingChore.ThingID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch Thing: %w", err)
+	}
+
+	oldState := thing.State
+	newState := oldState
+	actionExecuted := false
+
+	// Execute action based on type
+	switch chore.ThingChore.ActionType {
+	case "set":
+		if chore.ThingChore.ActionValue != "" {
+			newState = chore.ThingChore.ActionValue
+			actionExecuted = true
+		}
+
+	case "toggle":
+		if thing.Type == "boolean" {
+			if oldState == "false" || oldState == "" {
+				newState = "true"
+			} else {
+				newState = "false"
+			}
+			actionExecuted = true
+		}
+
+	case "increment":
+		if thing.Type == "number" {
+			currentValue, err := strconv.Atoi(oldState)
+			if err == nil {
+				incrementBy := 1
+				if chore.ThingChore.ActionValue != "" {
+					if val, err := strconv.Atoi(chore.ThingChore.ActionValue); err == nil {
+						incrementBy = val
+					}
+				}
+				newState = strconv.Itoa(currentValue + incrementBy)
+				actionExecuted = true
+			}
+		}
+
+	case "decrement":
+		if thing.Type == "number" {
+			currentValue, err := strconv.Atoi(oldState)
+			if err == nil {
+				decrementBy := 1
+				if chore.ThingChore.ActionValue != "" {
+					if val, err := strconv.Atoi(chore.ThingChore.ActionValue); err == nil {
+						decrementBy = val
+					}
+				}
+				newState = strconv.Itoa(currentValue - decrementBy)
+				actionExecuted = true
+			}
+		}
+	}
+
+	// Update Thing state if action was executed and state changed
+	if actionExecuted && newState != oldState {
+		thing.State = newState
+		if err := h.tRepo.UpdateThing(c, thing, thing.UserID); err != nil {
+			return fmt.Errorf("failed to update Thing state: %w", err)
+		}
+
+		logger.Info("Executed Thing action",
+			"choreId", chore.ID,
+			"thingId", thing.ID,
+			"actionType", chore.ThingChore.ActionType,
+			"oldState", oldState,
+			"newState", newState)
 	}
 
 	return nil
