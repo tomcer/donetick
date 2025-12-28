@@ -1701,7 +1701,7 @@ func (h *Handler) completeChore(c *gin.Context) {
 
 	// Execute Thing action if configured
 	if updatedChore.ThingChore != nil && updatedChore.ThingChore.ThingID > 0 && updatedChore.ThingChore.ActionType != "" {
-		if err := h.executeThingAction(c, updatedChore, logger); err != nil {
+		if err := h.executeThingAction(c, updatedChore); err != nil {
 			logger.Warn("Failed to execute Thing action",
 				"choreId", updatedChore.ID,
 				"thingId", updatedChore.ThingChore.ThingID,
@@ -3240,7 +3240,9 @@ func (h *Handler) sendNudgeToDevices(c context.Context, fcmTokens []string, titl
 }
 
 // executeThingAction executes the configured action on a Thing when a chore is completed
-func (h *Handler) executeThingAction(c context.Context, chore *chModel.Chore, logger *logging.Logger) error {
+func (h *Handler) executeThingAction(c context.Context, chore *chModel.Chore) error {
+	log := logging.FromContext(c)
+
 	if chore.ThingChore == nil || chore.ThingChore.ThingID <= 0 || chore.ThingChore.ActionType == "" {
 		return nil
 	}
@@ -3307,11 +3309,11 @@ func (h *Handler) executeThingAction(c context.Context, chore *chModel.Chore, lo
 	// Update Thing state if action was executed and state changed
 	if actionExecuted && newState != oldState {
 		thing.State = newState
-		if err := h.tRepo.UpdateThing(c, thing, thing.UserID); err != nil {
+		if err := h.tRepo.UpdateThingState(c, thing); err != nil {
 			return fmt.Errorf("failed to update Thing state: %w", err)
 		}
 
-		logger.Info("Executed Thing action",
+		log.Info("Executed Thing action",
 			"choreId", chore.ID,
 			"thingId", thing.ID,
 			"actionType", chore.ThingChore.ActionType,
