@@ -1,7 +1,30 @@
 
-# <img src="assets/icon.png" alt="drawing" width="45"/>Donetick 
+# <img src="assets/icon.png" alt="drawing" width="45"/>Donetick (tomcer Fork)
 
+> **Fork Notice:** This is a fork of [donetick/donetick](https://github.com/donetick/donetick) maintained by @tomcer.
+> For fork-specific information, see [FORK_INFO.md](FORK_INFO.md)
 
+## Installation from GHCR
+
+```bash
+# Pull the forked image
+docker pull ghcr.io/tomcer/donetick:latest
+
+# Run container
+docker run -d \
+  --name donetick-core \
+  -p 2021:2021 \
+  -v ./data:/usr/src/app/data \
+  -e DT_ENV=selfhosted \
+  ghcr.io/tomcer/donetick:latest
+```
+
+**Differences from Upstream:**
+- Published to GitHub Container Registry (GHCR): `ghcr.io/tomcer/donetick`
+- Custom frontend fork: `tomcer/donetic-frontend`
+- See [DEPLOYMENT.md](DEPLOYMENT.md) for deployment guide
+
+---
 
 **Simplify Tasks & Chores, Together!**
 
