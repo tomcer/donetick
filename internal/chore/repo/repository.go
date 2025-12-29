@@ -190,10 +190,11 @@ func (r *ChoreRepository) ApproveChore(c context.Context, chore *chModel.Chore, 
 		choreUpdates["next_due_date"] = dueDate
 		choreUpdates["status"] = chModel.ChoreStatusNoStatus
 
-		if dueDate != nil {
-			choreUpdates["assigned_to"] = nextAssignedTo
-		} else {
-			// one time task
+		// PATCH 2: Always save rotation, don't archive trigger chores
+		choreUpdates["assigned_to"] = nextAssignedTo
+
+		// Archive only non-trigger one-time tasks
+		if dueDate == nil && chore.FrequencyType != "trigger" {
 			choreUpdates["is_active"] = false
 		}
 
@@ -267,10 +268,11 @@ func (r *ChoreRepository) CompleteChore(c context.Context, chore *chModel.Chore,
 		choreUpdates["next_due_date"] = dueDate
 		choreUpdates["status"] = chModel.ChoreStatusNoStatus
 
-		if dueDate != nil {
-			choreUpdates["assigned_to"] = nextAssignedTo
-		} else {
-			// one time task
+		// PATCH 2: Always save rotation, don't archive trigger chores
+		choreUpdates["assigned_to"] = nextAssignedTo
+
+		// Archive only non-trigger one-time tasks
+		if dueDate == nil && chore.FrequencyType != "trigger" {
 			choreUpdates["is_active"] = false
 		}
 
@@ -340,10 +342,11 @@ func (r *ChoreRepository) SkipChore(c context.Context, chore *chModel.Chore, use
 		choreUpdates["next_due_date"] = dueDate
 		choreUpdates["status"] = chModel.ChoreStatusNoStatus
 
-		if dueDate != nil {
-			choreUpdates["assigned_to"] = nextAssignedTo
-		} else {
-			// one time task
+		// PATCH 2: Always save rotation, don't archive trigger chores
+		choreUpdates["assigned_to"] = nextAssignedTo
+
+		// Archive only non-trigger one-time tasks
+		if dueDate == nil && chore.FrequencyType != "trigger" {
 			choreUpdates["is_active"] = false
 		}
 
