@@ -35,6 +35,8 @@ type ThingTrigger struct {
 	ID           int    `json:"thingID" binding:"required"`
 	TriggerState string `json:"triggerState" binding:"required"`
 	Condition    string `json:"condition"`
+	ActionType   string `json:"actionType,omitempty"`
+	ActionValue  string `json:"actionValue,omitempty"`
 }
 
 type ThingType string

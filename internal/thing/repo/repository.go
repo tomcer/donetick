@@ -61,9 +61,16 @@ func (r *ThingRepository) GetThingByChoreID(c context.Context, choreID int) (*tM
 	return &thing, nil
 }
 
-func (r *ThingRepository) AssociateThingWithChore(c context.Context, thingID int, choreID int, triggerState string, condition string) error {
+func (r *ThingRepository) AssociateThingWithChore(c context.Context, thingID int, choreID int, triggerState string, condition string, actionType string, actionValue string) error {
 
-	return r.db.WithContext(c).Save(&tModel.ThingChore{ThingID: thingID, ChoreID: choreID, TriggerState: triggerState, Condition: condition}).Error
+	return r.db.WithContext(c).Save(&tModel.ThingChore{
+		ThingID:      thingID,
+		ChoreID:      choreID,
+		TriggerState: triggerState,
+		Condition:    condition,
+		ActionType:   actionType,
+		ActionValue:  actionValue,
+	}).Error
 }
 
 func (r *ThingRepository) DissociateThingWithChore(c context.Context, thingID int, choreID int) error {

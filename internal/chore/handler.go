@@ -695,7 +695,7 @@ func HandleThingAssociation(choreReq chModel.ChoreReq, savedChore *chModel.Chore
 			})
 			return true
 		}
-		if err := h.tRepo.AssociateThingWithChore(c, choreReq.ThingTrigger.ID, savedChore.ID, choreReq.ThingTrigger.TriggerState, choreReq.ThingTrigger.Condition); err != nil {
+		if err := h.tRepo.AssociateThingWithChore(c, choreReq.ThingTrigger.ID, savedChore.ID, choreReq.ThingTrigger.TriggerState, choreReq.ThingTrigger.Condition, choreReq.ThingTrigger.ActionType, choreReq.ThingTrigger.ActionValue); err != nil {
 			c.JSON(500, gin.H{
 				"error": "Error associating thing with chore",
 			})
