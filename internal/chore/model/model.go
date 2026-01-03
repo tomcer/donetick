@@ -252,7 +252,7 @@ func (c *Chore) CanEdit(userID int, circleUsers []*cModel.UserCircleDetail, upda
 		userHasPermission = true
 	}
 	for _, cu := range circleUsers {
-		if cu.UserID == userID && cu.Role == "admin" {
+		if cu.UserID == userID && (cu.Role == "admin" || cu.Role == "manager") {
 			userHasPermission = true
 			break
 		}

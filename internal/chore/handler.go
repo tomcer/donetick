@@ -106,6 +106,55 @@ func (h *Handler) getChores(c *gin.Context) {
 		return
 	}
 
+	// Add Thing trigger availability info to chores
+	var things []struct {
+		ID    int
+		State string
+	}
+	if err := h.choreRepo.GetDB().WithContext(c).
+		Table("things").
+		Select("id, state").
+		Where("user_id = ?", u.ID).
+		Find(&things).Error; err == nil {
+
+		thingStates := make(map[int]string)
+		for _, thing := range things {
+			thingStates[thing.ID] = thing.State
+		}
+
+		// Add canComplete field based on Thing trigger
+		type ChoreWithAvailability struct {
+			*chModel.Chore
+			CanComplete bool `json:"canComplete"`
+		}
+
+		var choresWithAvailability []ChoreWithAvailability
+		for _, chore := range chores {
+			canComplete := true
+
+			// Check Thing trigger if present
+			if chore.ThingChore != nil {
+				thingState, exists := thingStates[chore.ThingChore.ThingID]
+				if exists {
+					canComplete = isThingTriggerSatisfiedHandler(thingState, chore.ThingChore.TriggerState, chore.ThingChore.Condition)
+				} else {
+					canComplete = false // Thing not found
+				}
+			}
+
+			choresWithAvailability = append(choresWithAvailability, ChoreWithAvailability{
+				Chore:       chore,
+				CanComplete: canComplete,
+			})
+		}
+
+		c.JSON(200, gin.H{
+			"res": choresWithAvailability,
+		})
+		return
+	}
+
+	// Fallback if Things fetch failed
 	c.JSON(200, gin.H{
 		"res": chores,
 	})
@@ -726,17 +775,44 @@ func (h *Handler) deleteChore(c *gin.Context) {
 		})
 		return
 	}
-	// check if the user is the owner of the chore before deleting
-	if err := h.choreRepo.IsChoreOwner(c, id, currentUser.ID); err != nil {
+	// Check if the user is the owner of the chore OR is an admin/manager
+	chore, err := h.choreRepo.GetChore(c, id, currentUser.ID)
+	if err != nil {
+		c.JSON(404, gin.H{
+			"error": "Chore not found",
+		})
+		return
+	}
+
+	// Get user's role in the circle
+	circleUsers, err := h.circleRepo.GetCircleUsers(c, currentUser.CircleID)
+	if err != nil {
+		c.JSON(500, gin.H{
+			"error": "Failed to get circle users",
+		})
+		return
+	}
+
+	canDelete := false
+	for _, cu := range circleUsers {
+		if cu.UserID == currentUser.ID {
+			// Allow deletion if user is the creator, or is admin/manager
+			if chore.CreatedBy == currentUser.ID || cu.Role == "admin" || cu.Role == "manager" {
+				canDelete = true
+				break
+			}
+		}
+	}
+
+	if !canDelete {
 		c.JSON(403, gin.H{
 			"error": "You are not allowed to delete this chore",
 		})
 		return
 	}
 
-	// Get chore details before deletion for real-time event
-	chore, err := h.choreRepo.GetChore(c, id, currentUser.ID)
-	if err != nil {
+	// chore is already fetched above, no need to get it again
+	if err := h.choreRepo.DeleteChore(c, id); err != nil {
 		logger.Error("Failed to retrieve chore", "error", err)
 		c.JSON(500, gin.H{
 			"error": "Failed to retrieve chore",
@@ -1498,6 +1574,8 @@ func (h *Handler) completeChore(c *gin.Context) {
 		Note string `json:"note"`
 		// the completed by only can be populated by the admin or super user
 		CompletedBy *int `json:"completedBy"`
+		// custom points for this specific completion (overrides chore.Points)
+		Points *int `json:"points"`
 	}
 	var req CompleteChoreReq
 	logger := logging.FromContext(c)
@@ -1681,7 +1759,7 @@ func (h *Handler) completeChore(c *gin.Context) {
 		return
 	}
 
-	if err := h.choreRepo.CompleteChore(c, chore, additionalNotes, completedBy, nextDueDate, &completedDate, nextAssignedTo, true); err != nil {
+	if err := h.choreRepo.CompleteChore(c, chore, additionalNotes, completedBy, nextDueDate, &completedDate, nextAssignedTo, true, req.Points); err != nil {
 		c.JSON(500, gin.H{
 			"error": "Error completing chore",
 		})
@@ -1761,6 +1839,124 @@ func authorizeChoreCompletionForUser(h *Handler, c *gin.Context, currentUser *uM
 	}
 
 	return true
+}
+
+func (h *Handler) undoChoreCompletion(c *gin.Context) {
+	logger := logging.FromContext(c)
+	choreIDRaw := c.Param("id")
+	choreID, err := strconv.Atoi(choreIDRaw)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid ID"})
+		return
+	}
+
+	type UndoRequest struct {
+		NewDueDate *time.Time `json:"newDueDate"`
+	}
+
+	var req UndoRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		// Allow empty body
+		req.NewDueDate = nil
+	}
+
+	actualUser, impersonatedUser, hasImpersonation := auth.CurrentUserWithImpersonation(c)
+	if actualUser == nil {
+		logger.Error("Failed to get current user from authentication context")
+		c.JSON(401, gin.H{"error": "Authentication failed"})
+		return
+	}
+
+	var effectiveUser *uModel.UserDetails
+	if hasImpersonation {
+		effectiveUser = impersonatedUser
+		logger.Info("Undoing chore completion with impersonation",
+			"actualUserID", actualUser.ID,
+			"impersonatedUserID", impersonatedUser.ID,
+			"choreID", choreID)
+	} else {
+		effectiveUser = actualUser
+	}
+
+	// Get the chore
+	chore, err := h.choreRepo.GetChore(c, choreID, effectiveUser.ID)
+	if err != nil {
+		logger.Error("Failed to retrieve chore", "error", err)
+		c.JSON(500, gin.H{"error": "Failed to retrieve chore"})
+		return
+	}
+
+	// Get the latest completed history entry
+	history, err := h.choreRepo.GetLatestChoreHistory(c, choreID)
+	if err != nil {
+		logger.Error("Failed to get latest history", "error", err)
+		c.JSON(500, gin.H{"error": "No completion to undo"})
+		return
+	}
+
+	// Verify user has permission to undo
+	circleUsers, err := h.circleRepo.GetCircleUsers(c, actualUser.CircleID)
+	if err != nil {
+		logger.Error("Failed to retrieve circle users", "error", err)
+		c.JSON(500, gin.H{"error": "Failed to retrieve circle users"})
+		return
+	}
+
+	canUndo := false
+	for _, cu := range circleUsers {
+		if cu.UserID == effectiveUser.ID {
+			if cu.UserID == history.CompletedBy ||
+				(history.AssignedTo != nil && cu.UserID == *history.AssignedTo) ||
+				cu.Role == "admin" || cu.Role == "manager" {
+				canUndo = true
+				break
+			}
+		}
+	}
+
+	if !canUndo {
+		logger.Debug("User not authorized to undo", "userID", effectiveUser.ID, "choreID", choreID)
+		c.JSON(403, gin.H{"error": "Not authorized to undo this completion"})
+		return
+	}
+
+	// Undo the completion
+	restoredDueDate := req.NewDueDate
+	if restoredDueDate == nil && history.DueDate != nil {
+		restoredDueDate = history.DueDate
+	}
+
+	if err := h.choreRepo.UndoChoreCompletion(c, chore, history, restoredDueDate); err != nil {
+		logger.Error("Failed to undo completion", "error", err)
+		c.JSON(500, gin.H{"error": "Failed to undo completion"})
+		return
+	}
+
+	// Get updated chore
+	updatedChore, err := h.choreRepo.GetChore(c, choreID, effectiveUser.ID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Error getting updated chore"})
+		return
+	}
+
+	// Broadcast the undo event
+	if h.realTimeService != nil {
+		broadcaster := h.realTimeService.GetEventBroadcaster()
+		changes := map[string]interface{}{
+			"undone":    true,
+			"undoneBy":  effectiveUser.ID,
+			"undoneAt":  time.Now().UTC(),
+			"dueDate":   updatedChore.NextDueDate,
+			"isActive":  updatedChore.IsActive,
+			"assignedTo": updatedChore.AssignedTo,
+		}
+		broadcaster.BroadcastChoreUpdated(updatedChore, &effectiveUser.User, changes, nil)
+	}
+
+	c.JSON(200, gin.H{
+		"message": "Completion undone successfully",
+		"res":     updatedChore,
+	})
 }
 
 func (h *Handler) GetChoreHistory(c *gin.Context) {
@@ -3343,6 +3539,7 @@ func Routes(router *gin.Engine, h *Handler, auth *jwt.GinJWTMiddleware) {
 		choresRoutes.PUT("/:id/history/:history_id", h.ModifyHistory)
 		choresRoutes.DELETE("/:id/history/:history_id", h.DeleteHistory)
 		choresRoutes.POST("/:id/do", h.completeChore)
+		choresRoutes.POST("/:id/undo", h.undoChoreCompletion)
 		choresRoutes.POST("/:id/skip", h.skipChore)
 		choresRoutes.PUT("/:id/start", h.startChore)
 		choresRoutes.PUT("/:id/pause", h.pauseChore)
@@ -3361,4 +3558,37 @@ func Routes(router *gin.Engine, h *Handler, auth *jwt.GinJWTMiddleware) {
 		choresRoutes.POST("/:id/nudge", h.sendNudgeNotification)
 	}
 
+}
+
+// isThingTriggerSatisfiedHandler checks if a thing's current state satisfies the trigger condition
+func isThingTriggerSatisfiedHandler(currentState, triggerState, condition string) bool {
+	// For boolean and text types, simple equality check
+	if condition == "" {
+		return currentState == triggerState
+	}
+
+	// For number types with conditions (eq, neq, gt, gte, lt, lte)
+	currentValue, err1 := strconv.ParseFloat(currentState, 64)
+	triggerValue, err2 := strconv.ParseFloat(triggerState, 64)
+	if err1 != nil || err2 != nil {
+		// If not numbers, fall back to string comparison
+		return currentState == triggerState
+	}
+
+	switch condition {
+	case "eq":
+		return currentValue == triggerValue
+	case "neq":
+		return currentValue != triggerValue
+	case "gt":
+		return currentValue > triggerValue
+	case "gte":
+		return currentValue >= triggerValue
+	case "lt":
+		return currentValue < triggerValue
+	case "lte":
+		return currentValue <= triggerValue
+	default:
+		return currentState == triggerState
+	}
 }

@@ -24,6 +24,11 @@ func NewChoreRepository(db *gorm.DB, cfg *config.Config) *ChoreRepository {
 	return &ChoreRepository{db: db, dbType: cfg.Database.Type}
 }
 
+// GetDB returns the underlying database connection for complex queries
+func (r *ChoreRepository) GetDB() *gorm.DB {
+	return r.db
+}
+
 func (r *ChoreRepository) UpsertChore(c context.Context, chore *chModel.Chore) error {
 	return r.db.WithContext(c).Model(&chore).Save(chore).Error
 }
@@ -68,7 +73,7 @@ func (r *ChoreRepository) GetChore(c context.Context, choreID int, userID int) (
 
 func (r *ChoreRepository) GetChores(c context.Context, circleID int, userID int, includeArchived bool) ([]*chModel.Chore, error) {
 	var chores []*chModel.Chore
-	query := r.db.WithContext(c).Preload("Assignees").Preload("LabelsV2").Joins("left join chore_assignees on chores.id = chore_assignees.chore_id").Where("chores.circle_id = ? AND ((chores.is_private = false) OR (chores.is_private = true AND (chores.created_by = ? OR chore_assignees.user_id = ?)))", circleID, userID, userID).Group("chores.id").Order("next_due_date asc")
+	query := r.db.WithContext(c).Preload("Assignees").Preload("LabelsV2").Preload("ThingChore").Joins("left join chore_assignees on chores.id = chore_assignees.chore_id").Where("chores.circle_id = ? AND ((chores.is_private = false) OR (chores.is_private = true AND (chores.created_by = ? OR chore_assignees.user_id = ?)))", circleID, userID, userID).Group("chores.id").Order("next_due_date asc")
 	if !includeArchived {
 		query = query.Where("chores.is_active = ?", true)
 	}
@@ -261,7 +266,7 @@ func (r *ChoreRepository) RejectChore(c context.Context, choreID int, rejectionN
 	})
 }
 
-func (r *ChoreRepository) CompleteChore(c context.Context, chore *chModel.Chore, note *string, userID int, dueDate *time.Time, completedDate *time.Time, nextAssignedTo int, applyPoints bool) error {
+func (r *ChoreRepository) CompleteChore(c context.Context, chore *chModel.Chore, note *string, userID int, dueDate *time.Time, completedDate *time.Time, nextAssignedTo int, applyPoints bool, customPoints *int) error {
 	err := r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
 
 		choreUpdates := map[string]interface{}{}
@@ -304,10 +309,16 @@ func (r *ChoreRepository) CompleteChore(c context.Context, chore *chModel.Chore,
 			return err
 		}
 
-		// Update UserCirclee Points :
-		if applyPoints && chore.Points != nil && *chore.Points > 0 {
-			ch.Points = chore.Points
-			if err := tx.Model(&cModel.UserCircle{}).Where("user_id = ? AND circle_id = ?", userID, chore.CircleID).Update("points", gorm.Expr("points + ?", chore.Points)).Error; err != nil {
+		// Update UserCircle Points :
+		// Use customPoints if provided, otherwise use chore.Points
+		pointsToAward := chore.Points
+		if customPoints != nil {
+			pointsToAward = customPoints
+		}
+
+		if applyPoints && pointsToAward != nil && *pointsToAward > 0 {
+			ch.Points = pointsToAward
+			if err := tx.Model(&cModel.UserCircle{}).Where("user_id = ? AND circle_id = ?", userID, chore.CircleID).Update("points", gorm.Expr("points + ?", pointsToAward)).Error; err != nil {
 				return err
 			}
 		}
@@ -462,6 +473,86 @@ func (r *ChoreRepository) UpdateLatestChoreHistory(c context.Context, choreID in
 	return nil
 }
 
+func (r *ChoreRepository) GetLatestChoreHistory(c context.Context, choreID int) (*chModel.ChoreHistory, error) {
+	var history chModel.ChoreHistory
+	err := r.db.WithContext(c).
+		Where("chore_id = ? AND status = ?", choreID, chModel.ChoreHistoryStatusCompleted).
+		Order("id desc").
+		First(&history).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("no completed history found for chore ID %d", choreID)
+		}
+		return nil, err
+	}
+	return &history, nil
+}
+
+func (r *ChoreRepository) UndoChoreCompletion(c context.Context, chore *chModel.Chore, history *chModel.ChoreHistory, newDueDate *time.Time) error {
+	return r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
+		// 1. Delete the history entry
+		if err := tx.Delete(history).Error; err != nil {
+			return fmt.Errorf("failed to delete history entry: %w", err)
+		}
+
+		// 2. Deduct points from the user if points were awarded
+		if history.Points != nil && *history.Points > 0 {
+			if err := tx.Model(&cModel.UserCircle{}).
+				Where("user_id = ? AND circle_id = ?", history.CompletedBy, chore.CircleID).
+				Update("points", gorm.Expr("points - ?", *history.Points)).Error; err != nil {
+				return fmt.Errorf("failed to deduct points: %w", err)
+			}
+		}
+
+		// 3. Restore chore to previous state
+		choreUpdates := map[string]interface{}{
+			"is_active": true, // Unarchive if it was archived
+			"status":    chModel.ChoreStatusNoStatus,
+		}
+
+		// Restore assignee from history
+		if history.AssignedTo != nil {
+			choreUpdates["assigned_to"] = *history.AssignedTo
+		}
+
+		// Set due date: use provided newDueDate, or restore from history
+		if newDueDate != nil {
+			choreUpdates["next_due_date"] = newDueDate
+		} else if history.DueDate != nil {
+			choreUpdates["next_due_date"] = history.DueDate
+		}
+
+		if err := tx.Model(&chModel.Chore{}).Where("id = ?", chore.ID).Updates(choreUpdates).Error; err != nil {
+			return fmt.Errorf("failed to restore chore state: %w", err)
+		}
+
+		// 4. Reopen time sessions that were closed with this completion
+		// Find any time sessions that were finished at the same time as this completion
+		if history.PerformedAt != nil {
+			var timeSessions []*chModel.TimeSession
+			// Find sessions that were completed around the same time (within 5 seconds)
+			timeWindow := history.PerformedAt.Add(-5 * time.Second)
+			if err := tx.Model(&chModel.TimeSession{}).
+				Where("chore_id = ? AND status = ? AND updated_at >= ?",
+					chore.ID, chModel.TimeSessionStatusCompleted, timeWindow).
+				Find(&timeSessions).Error; err == nil && len(timeSessions) > 0 {
+
+				// Reopen the most recent session
+				for _, session := range timeSessions {
+					session.Status = chModel.TimeSessionStatusPaused
+					session.EndTime = nil
+				}
+				if err := tx.Save(&timeSessions).Error; err != nil {
+					// Don't fail the undo if time session reopening fails, just log it
+					// The history deletion and point deduction are more critical
+				}
+			}
+		}
+
+		return nil
+	})
+}
+
 func (r *ChoreRepository) DeleteChoreHistory(c context.Context, historyID int) error {
 	// create transaction and delete all the chore timer assiociated with the chore history then delete the chore history
 	return r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
@@ -560,6 +651,17 @@ func (r *ChoreRepository) SetDueDateIfNotExisted(c context.Context, choreID int,
 	}).Error
 }
 
+// SetDueDateIfExpired sets the due date if it's null or expired (< now)
+func (r *ChoreRepository) SetDueDateIfExpired(c context.Context, choreID int, dueDate time.Time) error {
+	now := time.Now().UTC()
+	return r.db.WithContext(c).Model(&chModel.Chore{}).
+		Where("id = ? AND (next_due_date IS NULL OR next_due_date < ?)", choreID, now).
+		Updates(map[string]interface{}{
+			"next_due_date": dueDate,
+			"is_active":     true,
+		}).Error
+}
+
 func (r *ChoreRepository) GetChoreDetailByID(c context.Context, choreID int, circleID int, userID int) (*chModel.ChoreDetail, error) {
 	var choreDetail chModel.ChoreDetail
 	if err := r.db.WithContext(c).
@@ -637,6 +739,46 @@ func (r *ChoreRepository) GetChoresHistoryByUserID(c context.Context, userID int
 	if !includeCircle {
 		query = query.Where("chore_histories.completed_by = ?", userID)
 	}
+
+	if err := query.Find(&chores).Error; err != nil {
+		return nil, err
+	}
+	return chores, nil
+}
+
+// GetChoresHistoryWithPagination returns chore history with limit and offset support for External API
+func (r *ChoreRepository) GetChoresHistoryWithPagination(c context.Context, userID int, circleID int, days int, maxRecords int, offset int, includeCircle bool) ([]*chModel.ChoreHistory, error) {
+	var chores []*chModel.ChoreHistory
+	since := time.Now().AddDate(0, 0, days*-1)
+
+	// Apply safety limits
+	if maxRecords <= 0 || maxRecords > 500 {
+		maxRecords = 100 // Default
+	}
+	if days > 90 {
+		days = 90 // Max 90 days
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	query := r.db.WithContext(c).
+		Table("chore_histories").
+		Select("chore_histories.*, chores.name as chore_name, circles.id as circle_id, time_sessions.duration, time_sessions.start_time, time_sessions.updated_at as timer_updated_at").
+		Joins("LEFT JOIN chores ON chore_histories.chore_id = chores.id").
+		Joins("LEFT JOIN circles ON chores.circle_id = circles.id").
+		Joins("LEFT JOIN time_sessions ON chore_histories.id = time_sessions.chore_history_id").
+		Joins("LEFT JOIN chore_assignees ON chores.id = chore_assignees.chore_id AND chore_assignees.user_id = ?", userID).
+		Where("circles.id = ? AND chore_histories.updated_at > ?", circleID, since).
+		Where("(chores.is_private = false) OR (chores.is_private = true AND (chores.created_by = ? OR chore_assignees.user_id = ?))", userID, userID).
+		Order("chore_histories.performed_at desc, chore_histories.updated_at desc")
+
+	if !includeCircle {
+		query = query.Where("chore_histories.completed_by = ?", userID)
+	}
+
+	// Apply pagination
+	query = query.Limit(maxRecords).Offset(offset)
 
 	if err := query.Find(&chores).Error; err != nil {
 		return nil, err
