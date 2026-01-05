@@ -128,7 +128,7 @@ func (h *Handler) getChores(c *gin.Context) {
 			CanComplete bool `json:"canComplete"`
 		}
 
-		var choresWithAvailability []ChoreWithAvailability
+		choresWithAvailability := make([]ChoreWithAvailability, 0)
 		for _, chore := range chores {
 			canComplete := true
 
@@ -155,6 +155,10 @@ func (h *Handler) getChores(c *gin.Context) {
 	}
 
 	// Fallback if Things fetch failed
+	// Ensure we return empty array [] instead of null
+	if chores == nil {
+		chores = []*chModel.Chore{}
+	}
 	c.JSON(200, gin.H{
 		"res": chores,
 	})
@@ -177,6 +181,11 @@ func (h *Handler) getArchivedChores(c *gin.Context) {
 			"error": "Failed to retrieve archived chores",
 		})
 		return
+	}
+
+	// Ensure we return empty array [] instead of null
+	if chores == nil {
+		chores = []*chModel.Chore{}
 	}
 
 	c.JSON(200, gin.H{
