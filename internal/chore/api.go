@@ -112,6 +112,11 @@ func (h *API) GetAllChores(c *gin.Context) {
 		filteredChores = filteredChores[:maxResults]
 	}
 
+	// Ensure we return empty array [] instead of null when no chores
+	if filteredChores == nil {
+		filteredChores = []*chModel.Chore{}
+	}
+
 	c.JSON(200, filteredChores)
 }
 
