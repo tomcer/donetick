@@ -1,12 +1,14 @@
 package thing
 
 import (
+	"fmt"
 	"strconv"
 	"time"
 
 	"donetick.com/core/config"
 	"donetick.com/core/internal/auth"
 	authMiddleware "donetick.com/core/internal/auth"
+	"donetick.com/core/internal/chore"
 	chRepo "donetick.com/core/internal/chore/repo"
 	cRepo "donetick.com/core/internal/circle/repo"
 	tModel "donetick.com/core/internal/thing/model"
@@ -59,6 +61,16 @@ func (h *API) UpdateThingState(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Evaluate triggers and schedule affected chores after Thing state change
+	if err := h.evaluateTriggersAfterThingChange(c, thing); err != nil {
+		log := logging.FromContext(c)
+		log.Warnw("Failed to evaluate triggers after Thing change",
+			"thingId", thing.ID,
+			"error", err)
+		// Don't fail the request, just log warning
+	}
+
 	c.JSON(200, gin.H{})
 }
 
@@ -111,10 +123,16 @@ func (h *API) ChangeThingState(c *gin.Context) {
 	c.JSON(200, gin.H{"state": thing.State})
 }
 
-func WebhookEvaluateTriggerAndScheduleDueDate(h *API, c *gin.Context, thing *tModel.Thing) bool {
-	// handler should be interface to not duplicate both WebhookEvaluateTriggerAndScheduleDueDate and EvaluateTriggerAndScheduleDueDate
-	// this is bad code written Saturday at 2:25 AM
+// evaluateTriggersAfterThingChange evaluates all chores triggered by a Thing state change
+// and schedules them according to their frequency settings
+func (h *API) evaluateTriggersAfterThingChange(c *gin.Context, thing *tModel.Thing) error {
+	if WebhookEvaluateTriggerAndScheduleDueDate(h, c, thing) {
+		return fmt.Errorf("failed to evaluate triggers")
+	}
+	return nil
+}
 
+func WebhookEvaluateTriggerAndScheduleDueDate(h *API, c *gin.Context, thing *tModel.Thing) bool {
 	log := logging.FromContext(c)
 
 	thingChores, err := h.tRepo.GetThingChoresByThingId(c, thing.ID)
@@ -122,16 +140,36 @@ func WebhookEvaluateTriggerAndScheduleDueDate(h *API, c *gin.Context, thing *tMo
 		c.JSON(500, gin.H{"error": err.Error()})
 		return true
 	}
+
+	triggerTime := time.Now().UTC()
+
 	for _, tc := range thingChores {
 		triggered := EvaluateThingChore(tc, thing.State)
 		if triggered {
-			errSave := h.choreRepo.SetDueDate(c, tc.ChoreID, time.Now().UTC())
+			// Get the full chore to access frequency settings
+			choreObj, err := h.choreRepo.GetChore(c, tc.ChoreID, thing.UserID)
+			if err != nil {
+				log.Error("Error getting chore ", err)
+				continue
+			}
+
+			// Calculate next due date using frequency settings
+			var dueDate time.Time
+			scheduledDate := chore.ScheduleTriggeredChore(choreObj, triggerTime)
+			if scheduledDate != nil {
+				dueDate = *scheduledDate
+			} else {
+				// No frequency configured, set to trigger time
+				dueDate = triggerTime
+			}
+
+			// Set due date if expired or doesn't exist
+			errSave := h.choreRepo.SetDueDateIfExpired(c, tc.ChoreID, dueDate)
 			if errSave != nil {
 				log.Error("Error setting due date for chore ", errSave)
 				log.Error("Chore ID ", tc.ChoreID, " Thing ID ", thing.ID, " State ", thing.State)
 			}
 		}
-
 	}
 	return false
 }
@@ -168,6 +206,8 @@ func APIs(cfg *config.Config, w *API, r *gin.Engine, auth *jwt.GinJWTMiddleware,
 		thingsAPI.GET("/:id/state", w.UpdateThingState)
 		thingsAPI.GET("/:id", w.GetThingByID)
 		thingsAPI.GET("/", w.GetAllThings)
+		// Support both with and without trailing slash to avoid CORS issues with 301 redirects
+		thingsAPI.GET("", w.GetAllThings)
 	}
 
 }
@@ -189,5 +229,11 @@ func (h *API) GetAllThings(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Ensure we return empty array [] instead of null
+	if things == nil {
+		things = []*tModel.Thing{}
+	}
+
 	c.JSON(200, things)
 }

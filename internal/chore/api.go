@@ -188,6 +188,11 @@ func (h *API) GetArchivedChores(c *gin.Context) {
 		return
 	}
 
+	// Ensure we return empty array [] instead of null
+	if archivedChores == nil {
+		archivedChores = []*chModel.Chore{}
+	}
+
 	c.JSON(200, gin.H{"res": archivedChores})
 }
 
@@ -717,6 +722,11 @@ func (h *API) GetChoresHistory(c *gin.Context) {
 		return
 	}
 
+	// Ensure we return empty array [] instead of null
+	if histories == nil {
+		histories = []*chModel.ChoreHistory{}
+	}
+
 	// Check if there are more records
 	hasMore := len(histories) == maxRecords
 
@@ -792,6 +802,11 @@ func (h *API) GetMonthlyPoints(c *gin.Context) {
 	// Assign ranks
 	for i := range results {
 		results[i].Rank = i + 1
+	}
+
+	// Ensure we return empty array [] instead of null
+	if results == nil {
+		results = []PointsResult{}
 	}
 
 	c.JSON(200, gin.H{
