@@ -53,6 +53,7 @@ type Handler struct {
 	storageRepo     *storageRepo.StorageRepository
 	storage         *storage.S3Storage
 	realTimeService *realtime.RealTimeService
+	dailyCleanup    *DailyCleanupService
 }
 
 func NewHandler(cr *chRepo.ChoreRepository, circleRepo *cRepo.CircleRepository, nt *notifier.Notifier,
@@ -62,7 +63,8 @@ func NewHandler(cr *chRepo.ChoreRepository, circleRepo *cRepo.CircleRepository, 
 	ur *uRepo.UserRepository,
 	dr *dRepo.DeviceRepository,
 	stoRepo *storageRepo.StorageRepository,
-	rts *realtime.RealTimeService) *Handler {
+	rts *realtime.RealTimeService,
+	dc *DailyCleanupService) *Handler {
 	return &Handler{
 		choreRepo:       cr,
 		uRepo:           ur,
@@ -78,6 +80,7 @@ func NewHandler(cr *chRepo.ChoreRepository, circleRepo *cRepo.CircleRepository, 
 		storageRepo:     stoRepo,
 		storage:         storage,
 		realTimeService: rts,
+		dailyCleanup:    dc,
 	}
 }
 
@@ -91,6 +94,15 @@ func (h *Handler) getChores(c *gin.Context) {
 		})
 		return
 	}
+
+	// Run daily cleanup check
+	if h.dailyCleanup != nil {
+		if err := h.dailyCleanup.CheckAndRunCleanup(c, u.CircleID); err != nil {
+			logger.Warnw("Failed to run daily cleanup", "error", err, "circleID", u.CircleID)
+			// Don't fail the request, just log the warning
+		}
+	}
+
 	includeArchived := false
 
 	if c.Query("includeArchived") == "true" {
@@ -2946,6 +2958,91 @@ func (h *Handler) rejectChore(c *gin.Context) {
 	})
 }
 
+func (h *Handler) markChoreAsNotNeeded(c *gin.Context) {
+	type NotNeededReq struct {
+		Note string `json:"note"`
+	}
+	var req NotNeededReq
+	logger := logging.FromContext(c)
+
+	currentUser := auth.MustCurrentUser(c)
+	choreID := c.Param("id")
+
+	var additionalNotes *string
+	_ = c.ShouldBind(&req)
+	if req.Note != "" {
+		additionalNotes = &req.Note
+	}
+
+	id, err := strconv.Atoi(choreID)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid ID"})
+		return
+	}
+
+	chore, err := h.choreRepo.GetChore(c, id, currentUser.ID)
+	if err != nil {
+		logger.Error("Failed to retrieve chore", "error", err)
+		c.JSON(500, gin.H{"error": "Failed to retrieve chore"})
+		return
+	}
+
+	// Calculate nextDueDate for recurring tasks
+	var nextDueDate *time.Time
+	if chore.FrequencyType != "once" && chore.FrequencyType != "no_repeat" && chore.FrequencyType != "trigger" {
+		nextDueDate, err = scheduleNextDueDate(c, chore, time.Now().UTC())
+		if err != nil {
+			logger.Error("Failed to schedule next due date", "error", err)
+			c.JSON(500, gin.H{"error": "Error scheduling next due date"})
+			return
+		}
+	}
+
+	// Find next assignee
+	choreHistory, err := h.choreRepo.GetChoreHistory(c, chore.ID)
+	if err != nil {
+		logger.Error("Failed to fetch chore history", "error", err)
+		c.JSON(500, gin.H{"error": "Failed to fetch chore history"})
+		return
+	}
+
+	var nextAssignedTo int
+	if chore.AssignedTo != nil {
+		nextAssignedTo, err = checkNextAssignee(chore, choreHistory, *chore.AssignedTo)
+	} else {
+		nextAssignedTo, err = checkNextAssignee(chore, choreHistory, currentUser.ID)
+	}
+	if err != nil {
+		logger.Error("Failed to check next assignee", "error", err)
+		c.JSON(500, gin.H{"error": "Error checking next assignee"})
+		return
+	}
+
+	// Mark as "not needed"
+	if err := h.choreRepo.MarkChoreAsNotNeeded(c, chore, additionalNotes, currentUser.ID, nextDueDate, nextAssignedTo); err != nil {
+		c.JSON(500, gin.H{"error": "Error marking chore as not needed"})
+		return
+	}
+
+	updatedChore, err := h.choreRepo.GetChore(c, id, currentUser.ID)
+	if err != nil {
+		logger.Error("Failed to retrieve chore", "error", err)
+		c.JSON(500, gin.H{"error": "Failed to retrieve chore"})
+		return
+	}
+
+	// Broadcast event
+	if h.realTimeService != nil {
+		broadcaster := h.realTimeService.GetEventBroadcaster()
+		changes := map[string]interface{}{
+			"status": "not_needed",
+		}
+		broadcaster.BroadcastChoreUpdated(updatedChore, &currentUser.User, changes, additionalNotes)
+	}
+
+	c.JSON(200, gin.H{"res": updatedChore})
+}
+
 func (h *Handler) updateChoreStatus(c *gin.Context) {
 	logger := logging.FromContext(c)
 	currentUser, ok := auth.CurrentUser(c)
@@ -3561,6 +3658,7 @@ func Routes(router *gin.Engine, h *Handler, auth *jwt.GinJWTMiddleware) {
 		choresRoutes.PUT("/:id/unarchive", h.UnarchiveChore)
 		choresRoutes.POST("/:id/approve", h.approveChore)
 		choresRoutes.POST("/:id/reject", h.rejectChore)
+		choresRoutes.POST("/:id/not-needed", h.markChoreAsNotNeeded)
 		choresRoutes.DELETE("/:id", h.deleteChore)
 		choresRoutes.PUT("/:id/timer/:session_id", h.UpdateTimeSession)
 		choresRoutes.DELETE("/:id/timer/:session_id", h.DeleteTimeSession)

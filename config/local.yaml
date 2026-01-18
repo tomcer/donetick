@@ -1,5 +1,5 @@
 name: "local"
-is_done_tick_dot_com: true
+is_done_tick_dot_com: false
 is_user_creation_disabled: false
 telegram:
   token: ""
@@ -30,7 +30,7 @@ server:
   cors_allow_origins:
     - "http://localhost:5173"
     - "http://localhost:7926"
-  serve_frontend: false
+  serve_frontend: true
 logging:
   level: "debug"
   encoding: "console"

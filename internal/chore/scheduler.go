@@ -412,3 +412,51 @@ func RemoveAssigneeAndReassign(chore *chModel.Chore, userID int) {
 	}
 	chore.UpdatedAt = time.Now()
 }
+
+// ScheduleTriggeredChore calculates the next due date for a trigger-based chore
+// when the Thing trigger is activated. Uses the chore's frequency settings and
+// IsRolling preference to determine the scheduling base.
+func ScheduleTriggeredChore(chore *chModel.Chore, triggerTime time.Time) *time.Time {
+	// If no frequency configured, return nil (no scheduling)
+	if chore.Frequency == 0 {
+		return nil
+	}
+
+	var baseDate time.Time
+
+	// IsRolling: schedule from trigger activation time
+	// Not rolling: schedule from existing due date if valid, otherwise from trigger time
+	if chore.IsRolling {
+		baseDate = triggerTime.UTC()
+	} else if chore.NextDueDate != nil && chore.NextDueDate.After(triggerTime) {
+		// Existing due date is still valid (in the future), keep it
+		return chore.NextDueDate
+	} else {
+		// Due date expired or doesn't exist, schedule from trigger time
+		baseDate = triggerTime.UTC()
+	}
+
+	// Apply frequency based on type
+	if chore.FrequencyMetadataV2 != nil && chore.FrequencyMetadataV2.Unit != nil {
+		switch *chore.FrequencyMetadataV2.Unit {
+		case "hours":
+			baseDate = baseDate.Add(time.Duration(chore.Frequency) * time.Hour)
+		case "days":
+			baseDate = baseDate.AddDate(0, 0, chore.Frequency)
+		case "weeks":
+			baseDate = baseDate.AddDate(0, 0, chore.Frequency*7)
+		case "months":
+			baseDate = baseDate.AddDate(0, chore.Frequency, 0)
+		case "years":
+			baseDate = baseDate.AddDate(chore.Frequency, 0, 0)
+		default:
+			// Fallback: treat as days
+			baseDate = baseDate.AddDate(0, 0, chore.Frequency)
+		}
+	} else {
+		// No metadata, fallback: treat frequency as days
+		baseDate = baseDate.AddDate(0, 0, chore.Frequency)
+	}
+
+	return &baseDate
+}

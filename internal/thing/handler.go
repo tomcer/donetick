@@ -5,6 +5,7 @@ import (
 	"time"
 
 	auth "donetick.com/core/internal/auth"
+	"donetick.com/core/internal/chore"
 	chRepo "donetick.com/core/internal/chore/repo"
 	cRepo "donetick.com/core/internal/circle/repo"
 	"donetick.com/core/internal/events"
@@ -141,10 +142,31 @@ func EvaluateTriggerAndScheduleDueDate(h *Handler, c *gin.Context, thing *tModel
 		c.JSON(500, gin.H{"error": err.Error()})
 		return true
 	}
+
+	triggerTime := time.Now().UTC()
+
 	for _, tc := range thingChores {
 		triggered := EvaluateThingChore(tc, thing.State)
 		if triggered {
-			err := h.choreRepo.SetDueDateIfNotExisted(c, tc.ChoreID, time.Now().UTC())
+			// Get the full chore to access frequency settings
+			choreObj, err := h.choreRepo.GetChore(c, tc.ChoreID, thing.UserID)
+			if err != nil {
+				c.JSON(500, gin.H{"error": err.Error()})
+				return true
+			}
+
+			// Calculate next due date using frequency settings
+			var dueDate time.Time
+			scheduledDate := chore.ScheduleTriggeredChore(choreObj, triggerTime)
+			if scheduledDate != nil {
+				dueDate = *scheduledDate
+			} else {
+				// No frequency configured, set to trigger time
+				dueDate = triggerTime
+			}
+
+			// Set due date if expired or doesn't exist
+			err = h.choreRepo.SetDueDateIfExpired(c, tc.ChoreID, dueDate)
 			if err != nil {
 				c.JSON(500, gin.H{"error": err.Error()})
 				return true

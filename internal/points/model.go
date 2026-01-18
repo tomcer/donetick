@@ -18,4 +18,6 @@ const (
 	PointsHistoryActionAdd PointsHistoryAction = iota
 	PointsHistoryActionRemove
 	PointsHistoryActionRedeem
+	PointsHistoryActionReset
+	PointsHistoryActionSet
 )

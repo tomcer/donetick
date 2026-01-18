@@ -487,6 +487,155 @@ curl -X POST -H "secretkey: YOUR_TOKEN" \
 
 ---
 
+#### POST /eapi/v1/chore/:id/undo (Plus Members Only)
+
+Undo last completion of a chore. Removes the completion from history, deducts points, and restores the chore to its previous state (due date, assignee).
+
+**Request Body (optional):**
+```json
+{
+  "newDueDate": "2026-01-20T10:00:00Z"  // Optional: override restored due date
+}
+```
+
+**Request:**
+```bash
+curl -X POST -H "secretkey: YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"newDueDate": "2026-01-20T10:00:00Z"}' \
+  https://donetick.example.com/eapi/v1/chore/123/undo
+```
+
+**Response:**
+```json
+{
+  "message": "Completion undone successfully",
+  "chore": {
+    "id": 123,
+    "name": "Clean kitchen",
+    "nextDueDate": "2026-01-20T10:00:00Z",
+    "assignedTo": 5,
+    "status": 0,
+    "isActive": true
+  }
+}
+```
+
+**Permissions:**
+- User who completed the chore
+- User assigned to the chore
+- Admin or manager role
+
+**Errors:**
+```json
+{"error": "No completion to undo"}
+{"error": "Not authorized to undo this completion"}
+```
+
+**Side Effects:**
+- Removes chore history entry
+- Deducts points from user who completed it
+- Restores previous due date and assignee
+
+---
+
+#### POST /eapi/v1/chore/:id/reject (Plus Members Only)
+
+Reject a chore that is pending approval. Changes status from PENDING_APPROVAL to REJECTED. Does NOT deduct points or change due date.
+
+**Request Body (optional):**
+```json
+{
+  "note": "Reason for rejection"  // Optional rejection note
+}
+```
+
+**Request:**
+```bash
+curl -X POST -H "secretkey: YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"note": "Needs more work"}' \
+  https://donetick.example.com/eapi/v1/chore/123/reject
+```
+
+**Response:**
+```json
+{
+  "id": 123,
+  "name": "Clean kitchen",
+  "status": 0,
+  "nextDueDate": "2026-01-20T10:00:00Z",
+  "assignedTo": 5
+}
+```
+
+**Permissions:**
+- Admin or manager role only
+
+**Errors:**
+```json
+{"error": "Chore is not pending approval"}
+{"error": "Only admins can reject chores"}
+```
+
+**Side Effects:**
+- Updates chore status back to "no status"
+- Chore remains scheduled at the same due date
+- Assignee can complete it again
+
+---
+
+#### POST /eapi/v1/chore/:id/not-needed (Plus Members Only)
+
+Mark a chore as "not needed". For one-time chores, archives them. For recurring chores, reschedules to next occurrence. No points awarded. Creates history entry with status NOT_NEEDED (7).
+
+**Request Body (optional):**
+```json
+{
+  "note": "Reason why not needed"  // Optional note
+}
+```
+
+**Request:**
+```bash
+curl -X POST -H "secretkey: YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"note": "Dishwasher was empty"}' \
+  https://donetick.example.com/eapi/v1/chore/123/not-needed
+```
+
+**Response:**
+```json
+// For one-time chore (archived):
+{
+  "id": 123,
+  "name": "Clean kitchen",
+  "isActive": false,
+  "status": 0
+}
+
+// For recurring chore (rescheduled):
+{
+  "id": 123,
+  "name": "Clean kitchen",
+  "nextDueDate": "2026-01-21T10:00:00Z",
+  "assignedTo": 6,
+  "status": 0
+}
+```
+
+**Permissions:**
+- Any circle member can mark chore as not needed
+
+**Side Effects:**
+- One-time chores: archived (isActive = false)
+- Recurring chores: rescheduled to next occurrence
+- No points awarded
+- Creates history entry with NOT_NEEDED status
+- Rotates assignee for recurring chores
+
+---
+
 #### PUT /eapi/v1/chore/:id (Plus Members Only)
 
 Update an existing chore.
@@ -578,6 +727,9 @@ Available to all users with valid API token:
 ### Plus Member Only Endpoints
 Require Plus membership:
 - POST /eapi/v1/chore/:id/complete
+- POST /eapi/v1/chore/:id/undo
+- POST /eapi/v1/chore/:id/reject
+- POST /eapi/v1/chore/:id/not-needed
 - PUT /eapi/v1/chore/:id
 - GET /eapi/v1/circle/members
 
@@ -786,6 +938,14 @@ async function toggleThing(thingId, newState) {
 ---
 
 ## Changelog
+
+### v1.0.4-fork (2026-01-18)
+- **Added:** `POST /eapi/v1/chore/:id/undo` - Undo last chore completion
+- **Added:** `POST /eapi/v1/chore/:id/reject` - Reject pending approval chores (admin only)
+- **Added:** `POST /eapi/v1/chore/:id/not-needed` - Mark chore as not needed
+- **Added:** New chore history statuses: AUTO_SKIPPED (6), NOT_NEEDED (7)
+- **Added:** Automatic 50% point penalty for late completions (after due date)
+- **Added:** Daily auto-reschedule for overdue recurring chores
 
 ### v1.0.3-fork (2026-01-03)
 - **Fixed:** `POST /eapi/v1/chore/:id/complete` now reads `completedBy` from JSON request body

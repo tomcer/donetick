@@ -558,6 +558,154 @@ func (h *Handler) RedeemPoints(c *gin.Context) {
 		"res": "Points redeemed successfully",
 	})
 }
+
+func (h *Handler) ResetPoints(c *gin.Context) {
+	type ResetPointsRequest struct {
+		UserID int `json:"userId"`
+	}
+
+	log := logging.FromContext(c)
+	currentUser, ok := auth.CurrentUser(c)
+	if !ok {
+		c.JSON(500, gin.H{"error": "Error getting current user"})
+		return
+	}
+
+	var req ResetPointsRequest
+	if err := c.ShouldBind(&req); err != nil {
+		c.JSON(400, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	circleIdRaw := c.Param("id")
+	circleID, err := strconv.Atoi(circleIdRaw)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid circle id"})
+		return
+	}
+
+	if circleID != currentUser.CircleID {
+		c.JSON(400, gin.H{"error": "You are not a member of this circle"})
+		return
+	}
+
+	// Check admin permission
+	members, err := h.circleRepo.GetCircleUsers(c, currentUser.CircleID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Error getting circle members"})
+		return
+	}
+
+	isAdmin := false
+	isValidMember := false
+	for _, user := range members {
+		if user.UserID == currentUser.ID && user.Role == "admin" {
+			isAdmin = true
+		}
+		if user.UserID == req.UserID {
+			isValidMember = true
+		}
+	}
+
+	if !isAdmin {
+		c.JSON(403, gin.H{"error": "You are not an admin of this circle"})
+		return
+	}
+
+	if !isValidMember {
+		c.JSON(400, gin.H{"error": "User is not a member of this circle"})
+		return
+	}
+
+	originalPoints, err := h.circleRepo.ResetPoints(c, currentUser.CircleID, req.UserID, currentUser.ID)
+	if err != nil {
+		log.Error("Error resetting points:", err)
+		c.JSON(500, gin.H{"error": "Error resetting points"})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"res":            "Points reset successfully",
+		"originalPoints": originalPoints,
+	})
+}
+
+func (h *Handler) SetPoints(c *gin.Context) {
+	type SetPointsRequest struct {
+		UserID int `json:"userId"`
+		Points int `json:"points"`
+	}
+
+	log := logging.FromContext(c)
+	currentUser, ok := auth.CurrentUser(c)
+	if !ok {
+		c.JSON(500, gin.H{"error": "Error getting current user"})
+		return
+	}
+
+	var req SetPointsRequest
+	if err := c.ShouldBind(&req); err != nil {
+		c.JSON(400, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	if req.Points < 0 {
+		c.JSON(400, gin.H{"error": "Points cannot be negative"})
+		return
+	}
+
+	circleIdRaw := c.Param("id")
+	circleID, err := strconv.Atoi(circleIdRaw)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid circle id"})
+		return
+	}
+
+	if circleID != currentUser.CircleID {
+		c.JSON(400, gin.H{"error": "You are not a member of this circle"})
+		return
+	}
+
+	// Check admin permission
+	members, err := h.circleRepo.GetCircleUsers(c, currentUser.CircleID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Error getting circle members"})
+		return
+	}
+
+	isAdmin := false
+	isValidMember := false
+	for _, user := range members {
+		if user.UserID == currentUser.ID && user.Role == "admin" {
+			isAdmin = true
+		}
+		if user.UserID == req.UserID {
+			isValidMember = true
+		}
+	}
+
+	if !isAdmin {
+		c.JSON(403, gin.H{"error": "You are not an admin of this circle"})
+		return
+	}
+
+	if !isValidMember {
+		c.JSON(400, gin.H{"error": "User is not a member of this circle"})
+		return
+	}
+
+	err = h.circleRepo.SetPoints(c, currentUser.CircleID, req.UserID, req.Points, currentUser.ID)
+	if err != nil {
+		log.Error("Error setting points:", err)
+		c.JSON(500, gin.H{"error": "Error setting points"})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"res": "Points set successfully",
+	})
+}
+
 func (h *Handler) ChangeMemberRole(c *gin.Context) {
 	log := logging.FromContext(c)
 	currentUser, ok := auth.CurrentUser(c)
@@ -653,6 +801,8 @@ func Routes(router *gin.Engine, h *Handler, auth *jwt.GinJWTMiddleware) {
 		circleRoutes.DELETE("/leave", h.LeaveCircle)
 		circleRoutes.DELETE("/:id/members/delete", h.DeleteCircleMember)
 		circleRoutes.POST("/:id/members/points/redeem", h.RedeemPoints)
+		circleRoutes.POST("/:id/members/points/reset", h.ResetPoints)
+		circleRoutes.POST("/:id/members/points/set", h.SetPoints)
 
 	}
 

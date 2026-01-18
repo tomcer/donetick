@@ -34,9 +34,10 @@ type API struct {
 	eventProducer *events.EventsProducer
 	stRepo        *stRepo.SubTasksRepository
 	tRepo         *tRepo.ThingRepository
+	dailyCleanup  *DailyCleanupService
 }
 
-func NewAPI(cr *chRepo.ChoreRepository, userRepo *uRepo.UserRepository, circleRepo *cRepo.CircleRepository, nPlanner *nps.NotificationPlanner, eventProducer *events.EventsProducer, stRepo *stRepo.SubTasksRepository, tRepo *tRepo.ThingRepository) *API {
+func NewAPI(cr *chRepo.ChoreRepository, userRepo *uRepo.UserRepository, circleRepo *cRepo.CircleRepository, nPlanner *nps.NotificationPlanner, eventProducer *events.EventsProducer, stRepo *stRepo.SubTasksRepository, tRepo *tRepo.ThingRepository, dc *DailyCleanupService) *API {
 	return &API{
 		choreRepo:     cr,
 		userRepo:      userRepo,
@@ -45,11 +46,21 @@ func NewAPI(cr *chRepo.ChoreRepository, userRepo *uRepo.UserRepository, circleRe
 		eventProducer: eventProducer,
 		stRepo:        stRepo,
 		tRepo:         tRepo,
+		dailyCleanup:  dc,
 	}
 }
 
 func (h *API) GetAllChores(c *gin.Context) {
+	log := logging.FromContext(c)
 	user := auth.MustCurrentUser(c)
+
+	// Run daily cleanup check
+	if h.dailyCleanup != nil {
+		if err := h.dailyCleanup.CheckAndRunCleanup(c, user.CircleID); err != nil {
+			log.Warnw("Failed to run daily cleanup", "error", err, "circleID", user.CircleID)
+			// Don't fail the request, just log the warning
+		}
+	}
 
 	// Parse maxResults parameter
 	maxResultsStr := c.DefaultQuery("maxResults", "100")
@@ -633,6 +644,151 @@ func (h *API) UndoChoreCompletion(c *gin.Context) {
 	})
 }
 
+func (h *API) RejectChore(c *gin.Context) {
+	log := logging.FromContext(c)
+	choreIDRaw := c.Param("id")
+	choreID, err := strconv.Atoi(choreIDRaw)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid ID"})
+		return
+	}
+
+	type RejectChoreReq struct {
+		Note string `json:"note"`
+	}
+	var req RejectChoreReq
+	_ = c.ShouldBind(&req)
+
+	currentUser := auth.MustCurrentUser(c)
+
+	// Get the chore
+	chore, err := h.choreRepo.GetChore(c, choreID, currentUser.ID)
+	if err != nil {
+		log.Errorw("Failed to retrieve chore", "error", err)
+		c.JSON(500, gin.H{"error": "Failed to retrieve chore"})
+		return
+	}
+
+	// Check permissions (admin/manager only)
+	circleUsers, err := h.circleRepo.GetCircleUsers(c, currentUser.CircleID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to retrieve circle users"})
+		return
+	}
+
+	isAdmin := false
+	for _, cu := range circleUsers {
+		if cu.UserID == currentUser.ID {
+			if cu.Role == "admin" || cu.Role == "manager" {
+				isAdmin = true
+				break
+			}
+		}
+	}
+
+	if !isAdmin {
+		c.JSON(403, gin.H{"error": "Only admins can reject chores"})
+		return
+	}
+
+	// Check if pending approval
+	if chore.Status != chModel.ChoreStatusPendingApproval {
+		c.JSON(400, gin.H{"error": "Chore is not pending approval"})
+		return
+	}
+
+	var rejectionNote *string
+	if req.Note != "" {
+		rejectionNote = &req.Note
+	}
+
+	// Reject the chore
+	if err := h.choreRepo.RejectChore(c, choreID, rejectionNote); err != nil {
+		c.JSON(500, gin.H{"error": "Error rejecting chore"})
+		return
+	}
+
+	updatedChore, err := h.choreRepo.GetChore(c, choreID, currentUser.ID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to retrieve chore"})
+		return
+	}
+
+	c.JSON(200, updatedChore)
+}
+
+func (h *API) MarkChoreAsNotNeeded(c *gin.Context) {
+	log := logging.FromContext(c)
+	user := auth.MustCurrentUser(c)
+	choreID := c.Param("id")
+
+	id, err := strconv.Atoi(choreID)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid ID"})
+		return
+	}
+
+	type NotNeededReq struct {
+		Note string `json:"note"`
+	}
+	var req NotNeededReq
+	_ = c.ShouldBind(&req)
+
+	var additionalNotes *string
+	if req.Note != "" {
+		additionalNotes = &req.Note
+	}
+
+	chore, err := h.choreRepo.GetChore(c, id, user.ID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to retrieve chore"})
+		return
+	}
+
+	// Calculate nextDueDate
+	var nextDueDate *time.Time
+	if chore.FrequencyType != "once" && chore.FrequencyType != "no_repeat" && chore.FrequencyType != "trigger" {
+		nextDueDate, err = scheduleNextDueDate(c, chore, time.Now().UTC())
+		if err != nil {
+			c.JSON(500, gin.H{"error": "Error scheduling next due date"})
+			return
+		}
+	}
+
+	// Find next assignee
+	choreHistory, err := h.choreRepo.GetChoreHistory(c, chore.ID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to fetch chore history"})
+		return
+	}
+
+	var nextAssignedTo int
+	if chore.AssignedTo != nil {
+		nextAssignedTo, err = checkNextAssignee(chore, choreHistory, *chore.AssignedTo)
+	} else {
+		nextAssignedTo, err = checkNextAssignee(chore, choreHistory, user.ID)
+	}
+	if err != nil {
+		log.Errorw("Failed to determine next assignee", "error", err)
+		c.JSON(500, gin.H{"error": "Error checking next assignee"})
+		return
+	}
+
+	// Mark as "not needed"
+	if err := h.choreRepo.MarkChoreAsNotNeeded(c, chore, additionalNotes, user.ID, nextDueDate, nextAssignedTo); err != nil {
+		c.JSON(500, gin.H{"error": "Error marking chore as not needed"})
+		return
+	}
+
+	updatedChore, err := h.choreRepo.GetChore(c, id, user.ID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to retrieve chore"})
+		return
+	}
+
+	c.JSON(200, updatedChore)
+}
+
 func (h *API) GetCircleMembers(c *gin.Context) {
 	currentUser := auth.MustCurrentUser(c)
 	users, err := h.circleRepo.GetCircleUsers(c, currentUser.CircleID)
@@ -973,11 +1129,14 @@ func APIs(cfg *config.Config, api *API, r *gin.Engine, auth *jwt.GinJWTMiddlewar
 		utils.TimeoutMiddleware(cfg.Server.WriteTimeout),
 		utils.RateLimitMiddleware(limiter),
 		authMiddleware.APITokenMiddleware(userRepo),
-		authMiddleware.RequirePlusMemberMiddleware(),
+		authMiddleware.RequirePlusMemberMiddleware(cfg),
 	)
 	{
 		tasksPlusAPI.POST("/:id/complete", api.CompleteChore)
 		tasksPlusAPI.PUT("/:id", api.UpdateChore)
+		tasksPlusAPI.POST("/:id/undo", api.UndoChoreCompletion)
+		tasksPlusAPI.POST("/:id/reject", api.RejectChore)
+		tasksPlusAPI.POST("/:id/not-needed", api.MarkChoreAsNotNeeded)
 	}
 
 	circleAPI := r.Group("eapi/v1/circle")
@@ -985,7 +1144,7 @@ func APIs(cfg *config.Config, api *API, r *gin.Engine, auth *jwt.GinJWTMiddlewar
 		utils.TimeoutMiddleware(cfg.Server.WriteTimeout),
 		utils.RateLimitMiddleware(limiter),
 		authMiddleware.APITokenMiddleware(userRepo),
-		authMiddleware.RequirePlusMemberMiddleware(),
+		authMiddleware.RequirePlusMemberMiddleware(cfg),
 	)
 	{
 		circleAPI.GET("/members", api.GetCircleMembers)

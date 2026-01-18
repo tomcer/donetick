@@ -116,6 +116,8 @@ const (
 	ChoreHistoryStatusPendingApproval ChoreHistoryStatus = 3
 	ChoreHistoryStatusRejected        ChoreHistoryStatus = 4
 	ChoreHistoryStatusMissed          ChoreHistoryStatus = 5
+	ChoreHistoryStatusAutoSkipped     ChoreHistoryStatus = 6 // Automatically skipped after midnight
+	ChoreHistoryStatusNotNeeded       ChoreHistoryStatus = 7 // Marked as not needed by user
 )
 
 type FrequencyMetadata struct {

@@ -133,8 +133,15 @@ func RequireMFAMiddleware() gin.HandlerFunc {
 }
 
 // RequirePlusMemberMiddleware requires that the authenticated user is a plus member
-func RequirePlusMemberMiddleware() gin.HandlerFunc {
+// For self-hosted installations (IsDoneTickDotCom = false), all users are considered plus members
+func RequirePlusMemberMiddleware(cfg interface{ GetIsDoneTickDotCom() bool }) gin.HandlerFunc {
 	return gin.HandlerFunc(func(c *gin.Context) {
+		// For self-hosted installations, all users are plus members
+		if !cfg.GetIsDoneTickDotCom() {
+			c.Next()
+			return
+		}
+
 		// Get current user from context (should be set by APITokenMiddleware)
 		user, exists := c.Get(identityKey)
 		if !exists {
@@ -150,7 +157,7 @@ func RequirePlusMemberMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Check if user is a plus member
+		// Check if user is a plus member (only for hosted version)
 		if !userDetails.IsPlusMember() {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Only plus members can access this endpoint"})
 			c.Abort()

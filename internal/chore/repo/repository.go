@@ -316,6 +316,14 @@ func (r *ChoreRepository) CompleteChore(c context.Context, chore *chModel.Chore,
 			pointsToAward = customPoints
 		}
 
+		// Penalize 50% for late completion
+		if pointsToAward != nil && *pointsToAward > 0 {
+			if chore.NextDueDate != nil && completedDate.After(*chore.NextDueDate) {
+				penalizedPoints := *pointsToAward / 2
+				pointsToAward = &penalizedPoints
+			}
+		}
+
 		if applyPoints && pointsToAward != nil && *pointsToAward > 0 {
 			ch.Points = pointsToAward
 			if err := tx.Model(&cModel.UserCircle{}).Where("user_id = ? AND circle_id = ?", userID, chore.CircleID).Update("points", gorm.Expr("points + ?", pointsToAward)).Error; err != nil {
@@ -415,6 +423,96 @@ func (r *ChoreRepository) SkipChore(c context.Context, chore *chModel.Chore, use
 		return nil
 	})
 	return err
+}
+
+func (r *ChoreRepository) MarkChoreAsNotNeeded(
+	c context.Context,
+	chore *chModel.Chore,
+	note *string,
+	userID int,
+	nextDueDate *time.Time,
+	nextAssignedTo int,
+) error {
+	return r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
+		choreUpdates := map[string]interface{}{}
+		choreUpdates["status"] = chModel.ChoreStatusNoStatus
+
+		// If nextDueDate is nil → archive (one-time task)
+		if nextDueDate == nil {
+			choreUpdates["is_active"] = false
+		} else {
+			// Recurring task → reschedule
+			choreUpdates["next_due_date"] = nextDueDate
+			choreUpdates["assigned_to"] = nextAssignedTo
+		}
+
+		// Create history record
+		ch := &chModel.ChoreHistory{
+			ChoreID:     chore.ID,
+			PerformedAt: timePtr(time.Now().UTC()),
+			CompletedBy: userID,
+			AssignedTo:  chore.AssignedTo,
+			DueDate:     chore.NextDueDate,
+			Note:        note,
+			Status:      chModel.ChoreHistoryStatusNotNeeded,
+			Points:      nil, // NO POINTS
+		}
+
+		if err := tx.Model(&chModel.Chore{}).Where("id = ?", chore.ID).Updates(choreUpdates).Error; err != nil {
+			return err
+		}
+
+		return tx.Save(ch).Error
+	})
+}
+
+func (r *ChoreRepository) AutoRescheduleOverdueChores(
+	c context.Context,
+	circleID int,
+) (int, error) {
+	// Find all active recurring tasks with nextDueDate < today's midnight
+	now := time.Now().UTC()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+
+	var overdueChores []*chModel.Chore
+	err := r.db.WithContext(c).
+		Where("circle_id = ?", circleID).
+		Where("is_active = ?", true).
+		Where("frequency_type NOT IN (?)", []string{"once", "no_repeat", "trigger"}).
+		Where("next_due_date < ?", midnight).
+		Find(&overdueChores).Error
+
+	if err != nil {
+		return 0, err
+	}
+
+	rescheduledCount := 0
+	for _, chore := range overdueChores {
+		// Calculate nextDueDate - we need to import/use the scheduler
+		// For now, skip chores we can't reschedule
+		// This will be handled by calling scheduleNextDueDate from handler
+
+		err = r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
+			// Create history record
+			ch := &chModel.ChoreHistory{
+				ChoreID:     chore.ID,
+				PerformedAt: timePtr(time.Now().UTC()),
+				CompletedBy: 0, // System user
+				AssignedTo:  chore.AssignedTo,
+				DueDate:     chore.NextDueDate,
+				Status:      chModel.ChoreHistoryStatusAutoSkipped,
+				Points:      nil, // NO POINTS
+			}
+
+			return tx.Save(ch).Error
+		})
+
+		if err == nil {
+			rescheduledCount++
+		}
+	}
+
+	return rescheduledCount, nil
 }
 
 func (r *ChoreRepository) GetChoreHistory(c context.Context, choreID int) ([]*chModel.ChoreHistory, error) {
@@ -915,4 +1013,9 @@ func (r *ChoreRepository) DeleteTimeSession(c context.Context, sessionID int, ch
 	})
 	// delete where session ID matches and chore ID matches
 
+}
+
+// Helper function to create a pointer to a time.Time value
+func timePtr(t time.Time) *time.Time {
+	return &t
 }

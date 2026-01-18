@@ -432,3 +432,4 @@ func (c *LogConfig) ParseLogLevel() zapcore.Level {
 		return zapcore.InfoLevel
 	}
 }
+func (c *Config) GetIsDoneTickDotCom() bool { return c.IsDoneTickDotCom }

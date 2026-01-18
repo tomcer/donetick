@@ -1,0 +1,61 @@
+# Multi-stage build for Donetick Fork
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates tzdata
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build with version info
+ARG VERSION=dev
+ARG COMMIT=dev
+ARG BUILD_DATE=dev
+
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags="-X 'donetick.com/core/config.Version=${VERSION}' \
+              -X 'donetick.com/core/config.Commit=${COMMIT}' \
+              -X 'donetick.com/core/config.BuildDate=${BUILD_DATE}' \
+              -w -s" \
+    -o donetick .
+
+# Runtime stage
+FROM alpine:latest
+
+# Install runtime dependencies
+RUN apk --no-cache add ca-certificates libc6-compat tzdata
+
+WORKDIR /app
+
+# Copy binary and config
+COPY --from=builder /build/donetick /app/donetick
+COPY --from=builder /build/config /app/config
+
+# Create data directory for SQLite
+RUN mkdir -p /data && chmod 777 /data
+
+# Environment variables
+ENV DT_ENV="selfhosted"
+ENV DT_SQLITE_PATH="/data/donetick.db"
+
+# Expose port
+EXPOSE 2021
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:2021/api/v1/resource || exit 1
+
+# Run as non-root user
+RUN addgroup -g 1000 donetick && \
+    adduser -D -u 1000 -G donetick donetick && \
+    chown -R donetick:donetick /app /data
+
+USER donetick
+
+CMD ["/app/donetick"]

@@ -78,6 +78,7 @@ func main() {
 		// fx.Provide(NewBot),
 		fx.Provide(database.NewDatabase),
 		fx.Provide(chRepo.NewChoreRepository),
+		fx.Provide(chore.NewDailyCleanupService),
 		fx.Provide(chore.NewHandler),
 		fx.Provide(uRepo.NewUserRepository),
 		fx.Provide(user.NewDeletionService),

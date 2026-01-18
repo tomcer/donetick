@@ -177,6 +177,92 @@ func (r *CircleRepository) RedeemPoints(c context.Context, circleID int, userID 
 	return nil
 }
 
+func (r *CircleRepository) ResetPoints(c context.Context, circleID int, userID int, resetByID int) (int, error) {
+	logger := logging.FromContext(c)
+
+	var uc cModel.UserCircle
+	if err := r.db.WithContext(c).Where("circle_id = ? AND user_id = ?", circleID, userID).First(&uc).Error; err != nil {
+		return 0, err
+	}
+
+	originalPoints := uc.Points
+
+	err := r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
+		// Reset both points and points_redeemed to 0
+		if err := tx.Model(&cModel.UserCircle{}).
+			Where("user_id = ? AND circle_id = ?", userID, circleID).
+			Updates(map[string]interface{}{
+				"points":          0,
+				"points_redeemed": 0,
+			}).Error; err != nil {
+			return err
+		}
+
+		// Create history entry
+		if err := tx.Create(&pModel.PointsHistory{
+			Action:    pModel.PointsHistoryActionReset,
+			CircleID:  circleID,
+			UserID:    userID,
+			Points:    originalPoints,
+			CreatedAt: time.Now().UTC(),
+			CreatedBy: resetByID,
+		}).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		logger.Error("Error resetting points", err)
+		return 0, err
+	}
+
+	return originalPoints, nil
+}
+
+func (r *CircleRepository) SetPoints(c context.Context, circleID int, userID int, newPoints int, setByID int) error {
+	logger := logging.FromContext(c)
+
+	// Get current points
+	var uc cModel.UserCircle
+	if err := r.db.WithContext(c).Where("circle_id = ? AND user_id = ?", circleID, userID).First(&uc).Error; err != nil {
+		return err
+	}
+
+	oldPoints := uc.Points
+
+	err := r.db.WithContext(c).Transaction(func(tx *gorm.DB) error {
+		// Set new points value
+		if err := tx.Model(&cModel.UserCircle{}).
+			Where("user_id = ? AND circle_id = ?", userID, circleID).
+			Update("points", newPoints).Error; err != nil {
+			return err
+		}
+
+		// Create history entry
+		if err := tx.Create(&pModel.PointsHistory{
+			Action:    pModel.PointsHistoryActionSet,
+			CircleID:  circleID,
+			UserID:    userID,
+			Points:    newPoints - oldPoints, // Store the difference
+			CreatedAt: time.Now().UTC(),
+			CreatedBy: setByID,
+		}).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		logger.Error("Error setting points", err)
+		return err
+	}
+
+	return nil
+}
+
 func (r *CircleRepository) SetWebhookURL(c context.Context, circleID int, webhookURL *string) error {
 	return r.db.WithContext(c).Model(&cModel.Circle{}).Where("id = ?", circleID).Update("webhook_url", webhookURL).Error
 }
